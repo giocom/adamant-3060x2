@@ -1,0 +1,37 @@
+services:
+  adamant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CUDA_ARCH: "86"
+        ADAMANT_PR: "30"
+    image: adamant:sm86
+    container_name: adamant
+    restart: unless-stopped
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/app/models:ro
+      - ./basalt_config.json:/app/basalt_config.json:ro
+      - ./cache:/root/.cache/basalt
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    command:
+      - serve
+      - --config
+      - /app/basalt_config.json
+      - --api-key
+      - ${ADAMANT_API_KEY:-adamant-local-key}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

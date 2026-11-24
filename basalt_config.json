@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "models": [
+    {
+      "model": "models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+      "alias": "qwen3.8-flash-next",
+      "gpu": "0,1",
+      "kv": "int8",
+      "max-context": 131072,
+      "parallel": 1,
+      "vision": "dynamic"
+    }
+  ],
+  "engine": {
+    "expert-cache": "auto",
+    "prefill": "auto",
+    "resident-experts": true,
+    "vram-reserve-mib": 700,
+    "peer-reserve-mib": 600,
+    "ram-reserve-mib": 2048
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "allowed-host": ["*"]
+  }
+}

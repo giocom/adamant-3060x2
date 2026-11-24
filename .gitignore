@@ -1,0 +1,7 @@
+.env
+models/
+cache/
+build/
+.venv/
+*.basalt
+*.log
