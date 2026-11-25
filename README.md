@@ -3,8 +3,10 @@
 `nixcat-dev/adamant`를 **NVIDIA RTX 3060 12GB × 2 (`sm_86`, Ampere)** 환경에서 **Docker Compose**로 빌드·벤치마크·서빙하기 위한 배포 구성 및 상세 설정 가이드입니다.
 
 - **타깃 모델**: `Qwen3.8-Flash-Next` (`Qwen3.8-FN-NVFP4-DQ6_K.basalt`, 122.6 GiB)
-- **기본 설정**: GPU 2장(`0,1`), `int8` KV, 128k 컨텍스트(`131,072`), 단일 요청(`parallel: 1`), `vision: "dynamic"` (SSD 스필 0%)
-- **핵심 패치 포함**: `Dockerfile` 빌드 시 RTX 3060(28 SM) 데드락을 해결하는 [PR #30](https://github.com/nixcat-dev/adamant/pull/30)([Issue #14](https://github.com/nixcat-dev/adamant/issues/14))을 자동 적용
+- **기본 설정**: GPU 2장(`0,1`), `int8` KV, 128k 컨텍스트(`131,072`), 단일 요청(`parallel: 1`), `vision: "dynamic"`, `spec: 8`, 대화 캐시(RAM 1.5 GiB + Disk 8 GiB), Expert 프로필 자동 학습 저장 (**SSD 스필 0%**)
+- **핵심 패치 포함**:
+  - `Dockerfile` 빌드 시 RTX 3060(28 SM) 데드락을 해결하는 [PR #30](https://github.com/nixcat-dev/adamant/pull/30)([Issue #14](https://github.com/nixcat-dev/adamant/issues/14)) 자동 적용
+  - **한국어 Draft Vocab 인플레이스 패치 스크립트** (`scripts/patch_korean_draft_vocab.py`) 포함
 
 ---
 
@@ -30,13 +32,16 @@ aria2c -x 16 -s 16 -k 8M \
   -o Qwen3.8-FN-NVFP4-DQ6_K.basalt \
   'https://huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt/resolve/main/Qwen3.8-FN-NVFP4-DQ6_K.basalt'
 
-# 4) Docker 이미지 빌드 (CUDA 13.0.3 + sm_86 + PR #30 자동 적용, 약 5~10분)
+# 4) (권장) 한국어 Draft Vocab 인플레이스 패치 적용 (0.1초, 자동 백업)
+python3 scripts/patch_korean_draft_vocab.py
+
+# 5) Docker 이미지 빌드 (CUDA 13.0.3 + sm_86 + PR #30 자동 적용, 약 5~10분)
 docker compose build
 
-# 5) 서버 기동
+# 6) 서버 기동
 docker compose up -d
 
-# 6) 로딩 로그 확인 (약 45~50초 소요)
+# 7) 로딩 로그 확인 (약 44~50초 소요)
 docker compose logs -f
 ```
 
@@ -70,7 +75,42 @@ docker info --format '{{.Runtimes}}' | grep nvidia
 
 ---
 
-## 3. 모델 팩 선택 가이드 (파일 크기 vs 실제 메모리 점유)
+## 3. 한국어 Draft Vocab 패치 (`scripts/patch_korean_draft_vocab.py`)
+
+### 왜 패치하나요?
+공식 `.basalt` 팩의 기본 `mtp/draft_vocab`은 영어/코드 중심으로 구성되어 있어 **1티어(`base`, 2-bit 고속 프록시 스크리닝)에 한글이 겨우 36개뿐**입니다. 한글이 나오면 2티어(`added`)가 활성화되는데, 이때 한글(6,771개)뿐 아니라 **중국어/한자 55,301개 + 일본어 3,503개까지 총 65,774개 행을 매 드래프트 스텝마다 Q8_0 헤드에서 불필요하게 스캔**하게 됩니다.
+
+| 구분 | 총 토큰 | 1티어 (`base`, 2-bit 고속) | 2티어 (`added`, Q8_0 추가 스캔) | 한글 포함 수 |
+|---|---:|---:|---:|---:|
+| **원본 `draft_vocab`** | 106,299 | 40,525 (한글 36개) | 65,774 (중국어·한자 55,301 / 일본어 3,503 / 한글 6,771) | 6,807 (대부분 2티어) |
+| **한국어 패치 후** | **47,296** | **47,296 (한글 전체 포함)** | **0 (불필요한 CJK 스캔 제거)** | **6,807 (100% 1티어)** |
+
+- **품질 손실 없음**: `adamant`는 exact speculative decoding(검증 헤드가 전체 248,320 토큰을 정확히 검증)을 사용하므로, 모델이 실제로 한자나 일본어를 출력해야 할 때도 정상 출력됩니다.
+- **122 GiB 파일 재복사 없음**: `.basalt` v2의 `mtp/draft_vocab` 섹션(2 MiB 정렬)만 제자리에서 수정하고 헤더 SHA-256을 갱신하므로 **0.1초**면 끝나며, 원본 헤더(64 KiB)와 원본 `draft_vocab`(425 KiB)을 자동 백업합니다.
+
+### 사용 방법
+*(반드시 `docker compose down`으로 서버가 모델 파일을 잡고 있지 않을 때 실행하세요.)*
+
+```bash
+# 현재 모델의 draft_vocab 구성 확인 (읽기 전용)
+python3 scripts/patch_korean_draft_vocab.py --inspect
+
+# 한국어 Draft Vocab 패치 적용 (원본 자동 백업: ./models/draft_vocab_backup/)
+docker compose down
+python3 scripts/patch_korean_draft_vocab.py
+docker compose up -d
+
+# 언제든 원본으로 0.1초 만에 바이트 단위 복구
+docker compose down
+python3 scripts/patch_korean_draft_vocab.py --restore
+docker compose up -d
+```
+
+*(외부 패키지 의존성 없이 Python 3 표준 라이브러리만으로 동작합니다.)*
+
+---
+
+## 4. 모델 팩 선택 가이드 (파일 크기 vs 실제 메모리 점유)
 
 `.basalt` 파일은 **① VRAM+RAM에 올라가는 전문가(`Experts`)**와 **② 디스크(SSD)에서 필요 행만 읽는 Engram/PLE 테이블**로 나뉩니다. 따라서 **디스크 용량과 실제 메모리(RAM) 점유량은 다릅니다.**
 
@@ -81,22 +121,20 @@ docker info --format '{{.Runtimes}}' | grep nvidia
 | `UD-Q4_K_XL` | 106.7 GiB | **71.7 GiB** | 0.0496 | 92.63% | 원본 MTP | 품질 최상이나 RAM 더 먹고 속도 느림 |
 | `UD-Q5_K_XL` | 150.5 GiB | **91.6 GiB** | 0.0255 | 94.82% | 원본 MTP | **128 GB RAM 증설 시** 0 SSD spill 가능 |
 
-- `NVFP4-DQ6_K`는 디스크 크기가 `UD-Q4_K_XL`보다 15 GiB 크지만, 그 차이는 디스크에 머무는 고정밀 Engram 테이블 때문이며 **실제 RAM 점유는 `NVFP4-DQ6_K`가 8.4 GiB 덜 먹습니다.**
-
 ---
 
-## 4. `basalt_config.json` 상세 옵션 해설 (직접 튜닝 가이드)
+## 5. `basalt_config.json` 상세 옵션 해설 (직접 튜닝 가이드)
 
 설정 변경 후에는 `docker compose restart`만 실행하면 바로 반영됩니다(이미지 재빌드 불필요).
 
-### 4-1. 동시요청(`parallel`)과 컨텍스트(`max-context`)
+### 5-1. 동시요청(`parallel`)과 컨텍스트(`max-context`)
 - **`max-context`는 `parallel` 슬롯 수로 균등 분할**됩니다.
   - `"parallel": 1, "max-context": 131072` → 1슬롯 × **128k**
   - `"parallel": 2, "max-context": 262144` → 2슬롯 × **128k** (슬롯당 128k)
   - `"parallel": 1, "max-context": 262144` → 1슬롯 × **256k** (모델 네이티브 최대 길이)
 - Qwen3.8-Flash-Next는 48레이어 중 36개가 선형 어텐션(GDN)이고 12개만 일반 어텐션(QSA)이라 KV 캐시가 작습니다 (`int8` 기준 128k 최대 ~2.1 GiB, 256k 최대 ~4.1 GiB).
 
-### 4-2. Vision 설정 (`vision`)
+### 5-2. Vision 설정 (`vision`)
 
 | 값 | 동작 방식 | 대기 VRAM | Pinned RAM | 인코딩 속도 | 추천 상황 |
 |---|---|---:|---:|---|---|
@@ -105,20 +143,22 @@ docker info --format '{{.Runtimes}}' | grep nvidia
 | `1` (GPU 번호) | GPU 1에 사이드카 상주 | **~2.2 GiB** | 0 GiB | 매우 빠름 | 이미지를 매우 자주 보낼 때 |
 | `"off"` | 비활성화 | 0 GiB | 0 GiB | - | 텍스트 전용 |
 
-### 4-3. `peer-exclusive` (RAM 절약 옵션)
-- **기본값 (`false`)**: GPU 1에 올라간 전문가(~10.5 GiB)를 시스템 RAM에도 중복 보관합니다. 덕분에 멀티 GPU 초장문 프리필 파이프라인(`prompt split`)과 빠른 전문가 스왑이 가능합니다.
-- **`"peer-exclusive": true`** (`engine` 블록): GPU 1에 올라간 전문가를 **시스템 RAM에서 제외**해 **RAM을 ~10.5 GiB 절약**합니다.
-  - 서버 로그에 `experts on SSD` 경고가 뜰 때 켜면 **SSD 스필을 0%**로 만들 수 있습니다.
-  - 트레이드오프: 초장문 멀티 GPU `prompt split`이 꺼집니다(일반 프리필/디코드 2장 분담은 유지).
+### 5-3. Expert 프로필 자동 학습 저장 & 대화 캐시 (기본 적용)
+- **`"expert-profile-save": "/root/.cache/basalt/learned.prof"`**: 사용 중 학습된 한국어/코딩 전문가 라우팅 패턴을 10분마다 및 종료 시 호스트 `./cache/learned.prof`에 저장해 재시작 직후 첫 턴부터 높은 적중률로 시작합니다.
+- **`"conversation-cache-mib": 1536`, `"conversation-cache-disk-mib": 8192`, `"conversation-cache-min-tokens": 3000`**: 3,000토큰 이상 대화를 RAM(최대 1.5 GiB) 및 디스크(최대 8 GiB)에 파킹해, 여러 채팅방을 번갈아 쓸 때 재프리필(TTFT)을 크게 줄여줍니다.
+- **`spec` (기본 `8` 유지 권장)**: 한국어 Draft Vocab 적용 후 수용률이 71~75%로 높아져 `spec=4`로 줄이면 오히려 속도가 ~30% 하락합니다(아래 실측 표 참고). 기본값(`8`) 유지를 권장합니다.
 
-### 4-4. `kv` 및 `kv-resident` (장문 256k / 다중 슬롯 최적화)
-- `kv`: `"int8"` 추천 (`fp16` 대비 VRAM 절반, BF16 대비 품질 손실 사실상 0). VRAM이 더 급할 때는 `"k8v4"` 또는 `"q4_0"`.
-- **`"kv-resident": 32768`** (`engine` 블록, 최소값 `20480`, `kv: "int8"` 또는 `"fp16"`과 사용):
-  - **32k 이하 대화**: 전부 VRAM에서 처리 (속도 손실 0).
-  - **32k 초과 대화**: GPU 0 VRAM에는 32k만 유지하고, 전체 KV 캐시(예: 256k ≈ 4 GiB)는 시스템 RAM에 두고 PCIe로 스트리밍합니다.
-  - **언제 켜는가?** 12 GB GPU 0에서 256k 기본 Elastic KV를 쓰면 GPU 0 Expert 캐시(~4.8 GiB) 중 **~3.4 GiB를 KV에 뺏겨** 48레이어 전체 미스가 늘어나므로, **128 GB RAM 환경에서 150k~256k를 자주 쓰거나 `parallel: 2 × 256k`를 쓸 때** 켜는 것이 유리합니다.
+### 5-4. `peer-exclusive` (RAM 절약 옵션)
+- **기본값 (`false`)**: GPU 1에 올라간 전문가(~10.5 GiB)를 시스템 RAM에도 중복 보관해 멀티 GPU 초장문 프리필 파이프라인(`prompt split`)을 활성화합니다.
+- **`"peer-exclusive": true`** (`engine` 블록): GPU 1 몫을 RAM에서 제외해 **RAM을 ~10.5 GiB 절약**합니다. 서버 로그에 `experts on SSD` 경고가 뜰 때 켜면 SSD 스필을 0%로 만들 수 있습니다.
 
-### 4-5. RAM 용량별 추천 프리셋 요약
+### 5-5. `kv` 및 `kv-resident` (장문 256k / 다중 슬롯 최적화)
+- `kv`: `"int8"` 추천 (`fp16` 대비 VRAM 절반, 품질 손실 사실상 0).
+- **`"kv-resident": 32768`** (`engine` 블록, 최소 `20480`, `kv: "int8"` 또는 `"fp16"`과 사용):
+  - 32k 이하 대화는 VRAM에서만 처리(속도 손실 0), 32k 초과 시 전체 KV 캐시를 시스템 RAM에 두고 PCIe로 스트리밍합니다.
+  - **128 GB RAM 환경에서 150k~256k 장문을 자주 쓰거나 `parallel: 2 × 256k`를 쓸 때** GPU 0의 Expert 캐시(~4.8 GiB)를 지키기 위해 켜는 것이 유리합니다.
+
+### 5-6. RAM 용량별 추천 프리셋 요약
 
 | 서버 RAM | 추천 조합 | `basalt_config.json` 핵심 값 |
 |---|---|---|
@@ -130,7 +170,7 @@ docker info --format '{{.Runtimes}}' | grep nvidia
 
 ---
 
-## 5. `Dockerfile` 및 `PR #30` 빌드 참고
+## 6. `Dockerfile` 및 `PR #30` 빌드 참고
 
 - RTX 3060(Ampere, `sm_86`, 28 SM)에서 `adamant` `main` 브랜치는 `gdn_commit_lazy` 커널의 SM 점유로 인해 추론 시 Layer 0~2 타임아웃이 발생합니다([Issue #14](https://github.com/nixcat-dev/adamant/issues/14)).
 - 현재 `Dockerfile`과 `docker-compose.yml`은 `ADAMANT_PR=30`을 기본으로 빌드해 이 문제를 해결합니다.
@@ -143,16 +183,12 @@ docker info --format '{{.Runtimes}}' | grep nvidia
 
 ---
 
-## 6. 성능 벤치마크 테스트 (`basalt-bench`)
+## 7. 성능 벤치마크 및 실측 결과
 
+### 7-1. 표준 벤치마크 (`basalt-bench`)
 서버 컨테이너를 잠깐 내린 뒤(`docker compose down`) GPU가 비어 있는 상태에서 실행합니다.
 
 ```bash
-# GPU 인식 및 CPU/RAM 대역폭 확인
-docker compose run --rm --entrypoint nvidia-smi adamant -L
-docker compose run --rm --entrypoint /app/bin/basalt-bench adamant --hardware
-
-# 프리필(16k, 64k) + 디코드(conv, struct, prose) 측정
 docker compose run --rm --entrypoint /app/bin/basalt-bench adamant \
   --engine /app/bin/basalt \
   --fixtures /app/data/bench \
@@ -161,8 +197,7 @@ docker compose run --rm --entrypoint /app/bin/basalt-bench adamant \
   -p 16k,64k -t conv,struct,prose
 ```
 
-### 실측 결과 (RTX 3060 12GB × 2 @ 170W, i9-10920X 10코어, 78 GiB RAM, PCIe 3.0 ×16)
-- 로딩: **48초**, **SSD 스필 0%** (`cuda0 9.8 GiB`, `RAM 58.0 GiB`, `cuda1 12.0 GiB`)
+**실측 결과 (RTX 3060 12GB × 2 @ 170W, i9-10920X 10코어, 78 GiB RAM, PCIe 3.0 ×16, SSD 스필 0%)**
 
 | 테스트 항목 | 실측 속도 (`t/s`) | Draft 수용률 | 평균 Draft 길이 |
 |---|---:|---:|---:|
@@ -172,22 +207,30 @@ docker compose run --rm --entrypoint /app/bin/basalt-bench adamant \
 | **Decode 산문 (`tg prose`)** | **58.0 tok/s** | 69.3% | 1.78 |
 | **Decode 코드/구조화 (`tg struct`)** | **104.0 tok/s** | 97.9% | 6.91 |
 
+### 7-2. 한국어 Draft Vocab + `spec` A/B 실측 (512토큰 한국어 설명 생성)
+
+| 설정 | 1회차 (콜드) | 2회차 (웜) | 비고 |
+|---|---:|---:|---|
+| 한국어 Draft Vocab + `spec=8` | 51.8 tok/s (71.2%) | **58.3 tok/s** (75.5%) | 기준 |
+| 한국어 Draft Vocab + `spec=4` | 38.0 tok/s (71.9%) | 39.7 tok/s (75.0%) | **-30% 하락 (비추천)** |
+| **한국어 Draft Vocab + `spec=8` + `expert-profile-save` + 대화 캐시 (최종)** | **56.6 tok/s (75.8%)** | **54.7 tok/s** (70.7%) | **재시작 직후 첫 턴도 바로 고속** |
+
 ---
 
-## 7. API 동작 검증 및 LiteLLM 연동
+## 8. API 동작 검증 및 LiteLLM 연동
 
 ### 헬스체크 & 모델 목록
 ```bash
 curl -s http://127.0.0.1:8080/health
 
-source .env
+set -a; source .env; set +a
 curl -s -H "Authorization: Bearer ${ADAMANT_API_KEY}" \
   http://127.0.0.1:8080/v1/models
 ```
 
 ### 텍스트 추론 테스트
 ```bash
-source .env
+set -a; source .env; set +a
 curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
   -H "Authorization: Bearer ${ADAMANT_API_KEY}" \
   -H "Content-Type: application/json" \
@@ -200,7 +243,7 @@ curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ### Vision 이미지 추론 테스트
 ```bash
-source .env
+set -a; source .env; set +a
 python3 - <<'PY'
 import base64, json, os, struct, urllib.request, zlib
 
@@ -226,7 +269,7 @@ req = urllib.request.Request(
         "max_tokens": 128
     }).encode(),
     headers={
-        "Authorization": f"Bearer {os.environ['ADAMANT_API_KEY']}",
+        "Authorization": f"Bearer {os.environ['ADAMANT_API_KEY'].strip()}",
         "Content-Type": "application/json"
     }
 )
@@ -247,7 +290,7 @@ model_list:
 
 ---
 
-## 8. 운영 명령어 & 트러블슈팅
+## 9. 운영 명령어 & 트러블슈팅
 
 ```bash
 docker compose ps          # 컨테이너 상태

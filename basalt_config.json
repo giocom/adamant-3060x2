@@ -15,6 +15,10 @@
     "expert-cache": "auto",
     "prefill": "auto",
     "resident-experts": true,
+    "expert-profile-save": "/root/.cache/basalt/learned.prof",
+    "conversation-cache-mib": 1536,
+    "conversation-cache-disk-mib": 8192,
+    "conversation-cache-min-tokens": 3000,
     "vram-reserve-mib": 700,
     "peer-reserve-mib": 600,
     "ram-reserve-mib": 2048
